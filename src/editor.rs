@@ -17,8 +17,17 @@ fn icon(name: &str) -> gtk::DrawingArea {
         .content_width(20)
         .content_height(20)
         .build();
-    area.set_draw_func(move |_, c, _, _| {
-        c.set_source_rgb(0.88, 0.91, 0.96);
+    area.set_draw_func(move |widget, c, width, height| {
+        // GTK can allocate more than the requested 20px to the button child.
+        // Keep the icon centered in its actual allocation in either theme.
+        c.translate((width as f64 - 20.) / 2., (height as f64 - 20.) / 2.);
+        let color = widget.style_context().color();
+        c.set_source_rgba(
+            color.red() as f64,
+            color.green() as f64,
+            color.blue() as f64,
+            color.alpha() as f64,
+        );
         c.set_line_width(1.6);
         c.set_line_cap(cairo::LineCap::Round);
         c.set_line_join(cairo::LineJoin::Round);
@@ -93,7 +102,6 @@ fn icon(name: &str) -> gtk::DrawingArea {
                 c.line_to(5., 13.);
             }
             "done" => {
-                c.set_source_rgb(0., 0., 0.);
                 c.move_to(4., 10.);
                 c.line_to(8., 14.);
                 c.line_to(16., 5.);
@@ -740,13 +748,7 @@ impl Editor {
             b.set_reveal_child(false);
             e.area.queue_draw();
         });
-        let css = gtk::CssProvider::new();
-        css.load_from_data(".editor-panel { background: alpha(#171a22, 0.96); border: 1px solid alpha(#aab8d4,0.20); border-radius: 14px; padding: 5px; box-shadow: 0 4px 16px alpha(black,0.35); } .editor-panel button { background: transparent; background-image: none; border: none; box-shadow: none; min-width: 32px; min-height: 32px; padding: 0; margin: 0; border-radius: 9px; } .editor-panel button:hover { background: alpha(#aab8d4,0.15); } .editor-panel button:checked { background: #41516f; } .editor-panel button.suggested-action { background: #396a62; } window { background: #12141b; }");
-        gtk::style_context_add_provider_for_display(
-            &gtk::prelude::WidgetExt::display(window),
-            &css,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
+        crate::theme::install(window);
         let state = editor.state.clone();
         let coordinate_layout = editor.area.create_pango_layout(None);
         editor

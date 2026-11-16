@@ -2,6 +2,7 @@ mod canvas;
 mod capture;
 mod editor;
 mod layer;
+mod theme;
 use gtk::prelude::*;
 
 fn main() -> gtk::glib::ExitCode {
