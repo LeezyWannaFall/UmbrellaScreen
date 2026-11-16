@@ -1447,6 +1447,58 @@ impl Editor {
     }
 }
 
+fn notify_saved(path: &std::path::Path) -> Result<(), String> {
+    use gtk::{gio, glib};
+    let connection = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
+        .map_err(|e| e.to_string())?;
+    let body = format!(
+        "Папка: {}\n{}",
+        path.parent().unwrap().display(),
+        path.file_name().unwrap().to_string_lossy()
+    );
+    let icon = notification_icon()?;
+    let hints = std::collections::HashMap::<String, glib::Variant>::new();
+    let parameters = (
+        "UmbrellaScreen",
+        0_u32,
+        icon.to_string_lossy().as_ref(),
+        "Скриншот сохранён",
+        body,
+        Vec::<String>::new(),
+        hints,
+        5000_i32,
+    )
+        .to_variant();
+    connection
+        .call_sync(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            Some(&parameters),
+            None,
+            gio::DBusCallFlags::NONE,
+            1500,
+            gio::Cancellable::NONE,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn notification_icon() -> Result<std::path::PathBuf, String> {
+    const ICON: &[u8] = include_bytes!("../assets/notification.png");
+    let directory = gtk::glib::user_cache_dir().join("umbrellascreen");
+    let path = directory.join("notification.png");
+    if std::fs::read(&path).ok().as_deref() == Some(ICON) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let temporary = directory.join(format!("notification-{}.tmp", std::process::id()));
+    std::fs::write(&temporary, ICON).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 // Separable sliding-window blur, cached once per screenshot. Work is linear in pixels.
 fn blur_image(source: &cairo::ImageSurface) -> Result<cairo::ImageSurface, String> {
     let (width, height) = (source.width() as usize, source.height() as usize);
@@ -1503,7 +1555,12 @@ fn blur_pass(
 
 fn save_png(png: &[u8]) -> Result<std::path::PathBuf, String> {
     let directory = gtk::glib::home_dir().join("Pictures/screenshots");
-    save_png_in(png, &directory)
+    let path = save_png_in(png, &directory)?;
+    // Notifications are best effort. A missing daemon must not invalidate a saved file.
+    if let Err(error) = notify_saved(&path) {
+        eprintln!("Уведомление: {error}");
+    }
+    Ok(path)
 }
 
 fn save_png_in(png: &[u8], directory: &std::path::Path) -> Result<std::path::PathBuf, String> {
