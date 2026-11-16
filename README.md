@@ -8,6 +8,8 @@ A screenshot app for **Arch Linux with Hyprland**. Select and edit a region dire
 
 Select a region with the mouse, add annotations, and press **Enter**. The PNG is saved to `~/Pictures/screenshots/`, copied to the clipboard, and the editor closes.
 
+![UmbrellaScreen screenshot editor on Hyprland](assets/screenshot.png)
+
 ## Installation
 
 Install the dependencies and build the app
