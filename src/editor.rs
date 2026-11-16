@@ -337,6 +337,42 @@ impl Transform {
     }
 }
 
+fn region_handles((x, y, w, h): (f64, f64, f64, f64)) -> [(f64, f64); 8] {
+    [
+        (x, y),
+        (x + w / 2., y),
+        (x + w, y),
+        (x + w, y + h / 2.),
+        (x + w, y + h),
+        (x + w / 2., y + h),
+        (x, y + h),
+        (x, y + h / 2.),
+    ]
+}
+
+fn resize_region(
+    region: (f64, f64, f64, f64),
+    handle: usize,
+    delta: (f64, f64),
+    image: (f64, f64),
+) -> (f64, f64, f64, f64) {
+    let (x, y, w, h) = region;
+    let (mut left, mut top, mut right, mut bottom) = (x, y, x + w, y + h);
+    if matches!(handle, 0 | 6 | 7) {
+        left = (x + delta.0).round().clamp(0., right - 2.);
+    }
+    if matches!(handle, 2..=4) {
+        right = (right + delta.0).round().clamp(left + 2., image.0);
+    }
+    if matches!(handle, 0..=2) {
+        top = (y + delta.1).round().clamp(0., bottom - 2.);
+    }
+    if matches!(handle, 4..=6) {
+        bottom = (bottom + delta.1).round().clamp(top + 2., image.1);
+    }
+    (left, top, right - left, bottom - top)
+}
+
 struct State {
     image: Option<cairo::ImageSurface>,
     blurred: Option<cairo::ImageSurface>,
@@ -348,6 +384,7 @@ struct State {
     moving: Option<(usize, Annotation)>,
     handle: Option<usize>,
     region_drag: Option<(f64, f64, f64, f64)>,
+    region_handle: Option<usize>,
     draft: Option<Annotation>,
     tool: Tool,
     color: (f64, f64, f64, f64),
@@ -545,6 +582,7 @@ impl Editor {
                 moving: None,
                 handle: None,
                 region_drag: None,
+                region_handle: None,
                 draft: None,
                 tool: Tool::Select,
                 color: (1., 0.25, 0.2, 1.),
@@ -695,7 +733,6 @@ impl Editor {
         done.connect_clicked(move |_| e.action("savecopy"));
         actions.append(&done);
         let overlay = gtk::Overlay::new();
-        // Reserve space so the floating controls never obscure the image.
 
         overlay.set_child(Some(&editor.background));
         editor.area.set_hexpand(true);
@@ -730,6 +767,52 @@ impl Editor {
         overlay.add_overlay(&top);
         overlay.add_overlay(&bottom);
         editor.root.append(&overlay);
+        let state = editor.state.clone();
+        let panels = [top.downgrade(), bottom.downgrade()];
+        let last_frame = std::cell::Cell::new(None);
+        editor.area.add_tick_callback(move |area, clock| {
+            let now = clock.frame_time();
+            let elapsed = last_frame
+                .replace(Some(now))
+                .map_or(0., |last| (now - last) as f64 / 1_000_000.);
+            let state = state.borrow();
+            let active = state.draft.is_some() || state.moving.is_some();
+            let object = state.draft.as_ref().or_else(|| {
+                state
+                    .moving
+                    .as_ref()
+                    .and_then(|(index, _)| state.history.items.get(*index))
+            });
+            let bounds = object.zip(state.transform(area)).map(|(object, t)| {
+                let (x, y, w, h) = object.bounds();
+                gtk::graphene::Rect::new(
+                    (t.x + x * t.scale) as f32,
+                    (t.y + y * t.scale) as f32,
+                    (w * t.scale) as f32,
+                    (h * t.scale) as f32,
+                )
+            });
+            drop(state);
+            for panel in panels.iter().filter_map(|panel| panel.upgrade()) {
+                let overlaps = bounds
+                    .as_ref()
+                    .zip(panel.compute_bounds(area).as_ref())
+                    .is_some_and(|(object, panel)| object.intersection(panel).is_some());
+                let target = if overlaps { 0.12 } else { 1. };
+                let current = panel.opacity();
+                let step = (elapsed / 0.12).min(1.);
+                let next = current + (target - current) * step;
+                panel.set_opacity(if (target - next).abs() < 0.01 {
+                    target
+                } else {
+                    next
+                });
+                // An ongoing canvas gesture must continue beneath the floating controls.
+                panel.set_can_target(!active);
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+
         let e = editor.clone();
         let t = top.clone();
         let b = bottom.clone();
@@ -841,6 +924,15 @@ impl Editor {
                         ] {
                             snapshot.append_color(&border, &r);
                         }
+                        if !state.selecting && state.tool == Tool::Select {
+                            for (hx, hy) in region_handles((x, y, w, h)) {
+                                snapshot.append_color(
+                                    &gdk::RGBA::new(0.12, 0.12, 0.14, 1.),
+                                    &rect(hx - 4., hy - 4., 8., 8.),
+                                );
+                                snapshot.append_color(&border, &rect(hx - 3., hy - 3., 6., 6.));
+                            }
+                        }
                         if state.selecting {
                             let layout = &coordinate_layout;
                             layout.set_text(&format!("{} x {}", iw as i32, ih as i32));
@@ -876,6 +968,7 @@ impl Editor {
             }
             let tolerance = 10. / state.transform(&e.area).unwrap().scale;
             state.handle = None;
+            state.region_handle = None;
             if state.tool == Tool::Select
                 && let Some(i) = state.selected
             {
@@ -891,15 +984,29 @@ impl Editor {
                 }
             }
             if let Some((x, y, w, h)) = state.selection {
-                let on_frame = point.0 >= x - tolerance
-                    && point.0 <= x + w + tolerance
-                    && point.1 >= y - tolerance
-                    && point.1 <= y + h + tolerance
-                    && ((point.0 - x).abs() < tolerance
-                        || (point.0 - x - w).abs() < tolerance
-                        || (point.1 - y).abs() < tolerance
-                        || (point.1 - y - h).abs() < tolerance);
-                if on_frame {
+                if state.tool == Tool::Select {
+                    let scale = state.transform(&e.area).unwrap().scale;
+                    state.region_handle =
+                        region_handles((x, y, w, h)).iter().position(|&(hx, hy)| {
+                            (point.0 - hx).abs() <= 6. / scale && (point.1 - hy).abs() <= 6. / scale
+                        });
+                    if state.region_handle.is_some() {
+                        state.history.region = state.selection;
+                        state.history.checkpoint();
+                        state.region_drag = state.selection;
+                        return;
+                    }
+                }
+                let frame_tolerance = 3. / state.transform(&e.area).unwrap().scale;
+                let on_frame = point.0 >= x - frame_tolerance
+                    && point.0 <= x + w + frame_tolerance
+                    && point.1 >= y - frame_tolerance
+                    && point.1 <= y + h + frame_tolerance
+                    && ((point.0 - x).abs() < frame_tolerance
+                        || (point.0 - x - w).abs() < frame_tolerance
+                        || (point.1 - y).abs() < frame_tolerance
+                        || (point.1 - y - h).abs() < frame_tolerance);
+                if state.tool == Tool::Select && on_frame {
                     state.history.region = state.selection;
                     state.history.checkpoint();
                     state.region_drag = state.selection;
@@ -956,6 +1063,18 @@ impl Editor {
             if let Some((sx, sy, sw, sh)) = state.region_drag {
                 let t = state.transform(&e.area).unwrap();
                 let image = state.image.as_ref().unwrap();
+                if let Some(handle) = state.region_handle {
+                    state.selection = Some(resize_region(
+                        (sx, sy, sw, sh),
+                        handle,
+                        (dx / t.scale, dy / t.scale),
+                        (image.width() as f64, image.height() as f64),
+                    ));
+                    state.history.region = state.selection;
+                    drop(state);
+                    e.area.queue_draw();
+                    return;
+                }
                 let previous = state.selection.unwrap();
                 state.selection = Some((
                     (sx + dx / t.scale)
@@ -1102,6 +1221,7 @@ impl Editor {
         drag.connect_drag_end(move |_, _, _| {
             let mut state = e.state.borrow_mut();
             if state.region_drag.take().is_some() {
+                state.region_handle = None;
                 return;
             }
             if state.selecting {
@@ -1659,6 +1779,28 @@ fn save_png_in(png: &[u8], directory: &std::path::Path) -> Result<std::path::Pat
 mod tests {
     use super::*;
     #[test]
+    fn region_resize_clamps_edges_and_preserves_opposite_corner() {
+        let region = (20., 30., 100., 80.);
+        assert_eq!(
+            resize_region(region, 0, (-50., -50.), (300., 200.)),
+            (0., 0., 120., 110.)
+        );
+        assert_eq!(
+            resize_region(region, 4, (500., 500.), (300., 200.)),
+            (20., 30., 280., 170.)
+        );
+        assert_eq!(
+            resize_region(region, 0, (500., 500.), (300., 200.)),
+            (118., 108., 2., 2.)
+        );
+        assert_eq!(
+            resize_region(region, 3, (20., 50.), (300., 200.)),
+            (20., 30., 120., 80.)
+        );
+        assert_eq!(region_handles(region)[4], (120., 110.));
+    }
+
+    #[test]
     fn notification_preview_is_bounded_packed_rgba() {
         let directory =
             std::env::temp_dir().join(format!("umbrella-preview-{}", std::process::id()));
@@ -1864,6 +2006,7 @@ mod tests {
             moving: None,
             handle: None,
             region_drag: None,
+            region_handle: None,
             draft: None,
             tool: Tool::Rectangle,
             color: (1., 0., 0., 1.),
@@ -1921,6 +2064,7 @@ mod tests {
             moving: None,
             handle: None,
             region_drag: None,
+            region_handle: None,
             draft: None,
             tool: Tool::Pen,
             color: (1., 0., 0., 1.),
