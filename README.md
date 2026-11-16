@@ -1,14 +1,16 @@
 # UmbrellaScreen
 
+English · [Русский](README.ru.md)
+
 [![CI](https://github.com/LeezyWannaFall/UmbrellaScreen/actions/workflows/ci.yml/badge.svg)](https://github.com/LeezyWannaFall/UmbrellaScreen/actions/workflows/ci.yml)
 
-Приложение для скриншотов на **Arch Linux с Hyprland**. Выделение области и редактирование работают поверх рабочего стола.
+A screenshot app for **Arch Linux with Hyprland**. Select and edit a region directly over your desktop.
 
-Выделите область мышью, добавьте пометки и нажмите **Enter**. PNG сохранится в `~/Pictures/screenshots/`, скопируется в буфер обмена, редактор закроется.
+Select a region with the mouse, add annotations, and press **Enter**. The PNG is saved to `~/Pictures/screenshots/`, copied to the clipboard, and the editor closes.
 
-## Установка
+## Installation
 
-Установите зависимости и соберите приложение
+Install the dependencies and build the app
 
 ```sh
 sudo pacman -S --needed base-devel git rust pkgconf gtk4 gtk4-layer-shell grim wl-clipboard
@@ -18,63 +20,63 @@ cd UmbrellaScreen
 cargo build --release --locked
 ```
 
-Скопируйте исполняемый файл в пользовательский каталог программ
+Copy the executable to your local applications directory
 
 ```sh
 install -Dm755 target/release/umbrellascreen ~/.local/bin/umbrellascreen
 ```
 
-## Запуск
+## Launch
 
-Выполните в сессии Hyprland
+Run inside a Hyprland session
 
 ```sh
 ~/.local/bin/umbrellascreen
 ```
 
-Чтобы запускать приложение по **Print**, добавьте привязку в используемый конфиг Hyprland.
+To launch with **Print**, add a binding to your active Hyprland configuration.
 
-Для `hyprland.conf`
+For `hyprland.conf`
 
 ```ini
 bind = , Print, exec, ~/.local/bin/umbrellascreen
 ```
 
-Для `hyprland.lua`
+For `hyprland.lua`
 
 ```lua
 hl.bind("Print", hl.dsp.exec_cmd("~/.local/bin/umbrellascreen"))
 ```
 
-Примените изменения командой `hyprctl reload`.
+Apply the changes with `hyprctl reload`.
 
-## Редактор
+## Editor
 
-- Перо, линия, стрелка, прямоугольник, эллипс и текст.
-- Размытие исходного изображения внутри выделенного прямоугольника.
-- Выбор цвета и толщины линий.
-- Перемещение, масштабирование и вращение объектов.
-- Отмена и повтор действий.
+- Pen, line, arrow, rectangle, ellipse, and text.
+- Blur the original image within a selected rectangle.
+- Color and line width controls.
+- Move, resize, and rotate objects.
+- Undo and redo.
 
-Наведите курсор на кнопку для подсказки. Для ввода текста выберите **T**, нажмите внутри снимка и подтвердите надпись клавишей **Enter**.
+Hover over a button for a tooltip. To add text, select **T**, click inside the screenshot, and press **Enter** to confirm the text.
 
-| Действие | Клавиша или жест |
+| Action | Key or gesture |
 | --- | --- |
-| Сохранить, скопировать и закрыть | **Enter** |
-| Сохранить PNG | **Ctrl+S** |
-| Копировать PNG | **Ctrl+C** |
-| Отменить / повторить | **Ctrl+Z** / **Ctrl+Shift+Z** |
-| Удалить выбранный объект | **Delete** / **Backspace** |
-| Закрыть | **Esc** |
-| Переместить область снимка | Потянуть рамку |
-| Переместить объект | Выбрать инструмент выбора и перетащить объект |
-| Изменить размер объекта | Потянуть маркер на рамке |
-| Повернуть объект | Потянуть маркер над рамкой |
+| Save, copy, and close | **Enter** |
+| Save PNG | **Ctrl+S** |
+| Copy PNG | **Ctrl+C** |
+| Undo / redo | **Ctrl+Z** / **Ctrl+Shift+Z** |
+| Delete selected object | **Delete** / **Backspace** |
+| Close | **Esc** |
+| Move screenshot region | Drag its border |
+| Move an object | Choose the selection tool and drag the object |
+| Resize an object | Drag a handle on its border |
+| Rotate an object | Drag the handle above its border |
 
-Сочетания Ctrl работают независимо от раскладки. При вводе текста действуют обычные сочетания текстового поля. Кнопка с галочкой сохраняет и копирует снимок, затем закрывает редактор.
+Ctrl shortcuts work across keyboard layouts. Standard text-field shortcuts apply while entering text. The checkmark button saves and copies the screenshot, then closes the editor.
 
-## Сохранение
+## Saving
 
-Каталог `~/Pictures/screenshots/` создаётся автоматически. Файлы получают уникальные имена и сохраняют разрешение выбранной области. После сохранения отправляется уведомление с миниатюрой и расположением файла. Для уведомлений нужен запущенный сервис уведомлений.
+The `~/Pictures/screenshots/` directory is created automatically. Files have unique names and preserve the selected region's resolution. Saving sends a notification with a thumbnail and the file location. Notifications require a running notification service.
 
-Содержимое экрана фиксируется при запуске. Область снимка ограничена одним монитором. При ошибке сохранения или копирования редактор показывает сообщение и остаётся открытым.
+The desktop image is captured when the app launches. Each screenshot region is limited to one monitor. If saving or copying fails, the editor displays an error and stays open.
