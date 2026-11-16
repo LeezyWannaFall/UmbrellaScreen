@@ -38,6 +38,18 @@ fn icon(name: &str) -> gtk::DrawingArea {
                 c.line_to(9., 14.);
                 c.close_path();
             }
+            "Линия" => {
+                c.move_to(4., 16.);
+                c.line_to(16., 4.);
+            }
+            "Размытие" => {
+                for y in [5., 10., 15.] {
+                    for x in [5., 10., 15.] {
+                        c.arc(x, y, 1., 0., std::f64::consts::TAU);
+                        let _ = c.fill();
+                    }
+                }
+            }
             "Стрелка" => {
                 c.move_to(4., 16.);
                 c.line_to(16., 4.);
@@ -136,6 +148,8 @@ enum Tool {
     Select,
     Pen,
     Arrow,
+    Line,
+    Blur,
     Rectangle,
     Ellipse,
     Text,
@@ -188,18 +202,43 @@ impl<T: Clone> History<T> {
         }
     }
 }
+struct TextGeometry {
+    path: cairo::Path,
+    bounds: (f64, f64, f64, f64),
+}
+
 impl Annotation {
+    fn text_geometry(&self) -> Result<TextGeometry, String> {
+        // Build glyph outlines in image coordinates, independent of preview/object transforms.
+        let surface =
+            cairo::ImageSurface::create(cairo::Format::ARgb32, 1, 1).map_err(|e| e.to_string())?;
+        let cr = cairo::Context::new(&surface).map_err(|e| e.to_string())?;
+        let layout = pangocairo::functions::create_layout(&cr);
+        let mut font = gtk::pango::FontDescription::from_string("Sans");
+        font.set_absolute_size((self.width * 6. + 12.) * gtk::pango::SCALE as f64);
+        layout.set_font_description(Some(&font));
+        layout.set_text(&self.text);
+        cr.move_to(self.start.0, self.start.1);
+        pangocairo::functions::layout_path(&cr, &layout);
+        let (x1, y1, x2, y2) = cr.path_extents().map_err(|e| e.to_string())?;
+        let bounds = (x1, y1, (x2 - x1).max(1.), (y2 - y1).max(1.));
+        Ok(TextGeometry {
+            path: cr.copy_path().map_err(|e| e.to_string())?,
+            bounds,
+        })
+    }
+
     fn raw_bounds(&self) -> (f64, f64, f64, f64) {
+        if self.tool == Tool::Blur {
+            return (
+                self.start.0.min(self.end.0),
+                self.start.1.min(self.end.1),
+                (self.end.0 - self.start.0).abs(),
+                (self.end.1 - self.start.1).abs(),
+            );
+        }
         if self.tool == Tool::Text {
-            let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1, 1).unwrap();
-            let cr = cairo::Context::new(&surface).unwrap();
-            let layout = pangocairo::functions::create_layout(&cr);
-            let mut font = gtk::pango::FontDescription::from_string("Sans");
-            font.set_absolute_size((self.width * 6. + 12.) * gtk::pango::SCALE as f64);
-            layout.set_font_description(Some(&font));
-            layout.set_text(&self.text);
-            let (w, h) = layout.pixel_size();
-            return (self.start.0, self.start.1, w as f64, h as f64);
+            return self.text_geometry().expect("Cairo text geometry").bounds;
         }
         let mut min = (self.start.0.min(self.end.0), self.start.1.min(self.end.1));
         let mut max = (self.start.0.max(self.end.0), self.start.1.max(self.end.1));
@@ -244,7 +283,9 @@ impl Annotation {
         self.transformed([1., 0., 0., 1., dx, dy])
     }
     fn handles(&self, scale: f64) -> [(f64, f64); 9] {
-        let (x, y, w, h) = self.bounds();
+        let (x, y, w, h) = self.raw_bounds();
+        let m = self.matrix;
+        let vertical_scale = m[2].hypot(m[3]).max(0.001);
         [
             (x, y),
             (x + w / 2., y),
@@ -254,8 +295,9 @@ impl Annotation {
             (x + w / 2., y + h),
             (x, y + h),
             (x, y + h / 2.),
-            (x + w / 2., y - 24. / scale),
+            (x + w / 2., y - 24. / (scale * vertical_scale)),
         ]
+        .map(|(x, y)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]))
     }
 }
 
@@ -289,6 +331,7 @@ impl Transform {
 
 struct State {
     image: Option<cairo::ImageSurface>,
+    blurred: Option<cairo::ImageSurface>,
     selection: Option<(f64, f64, f64, f64)>,
     selecting: bool,
     anchor: Option<(f64, f64)>,
@@ -324,15 +367,18 @@ impl State {
             cr.clip();
         }
         for item in &self.history.items {
-            draw_annotation(cr, item)?;
+            draw_annotation(cr, item, self.blurred.as_ref())?;
         }
         if preview && let Some(item) = &self.draft {
-            draw_annotation(cr, item)?;
+            draw_annotation(cr, item, self.blurred.as_ref())?;
         }
         cr.restore().map_err(|e| e.to_string())
     }
     fn png(&self) -> Result<Vec<u8>, String> {
         let image = self.image.as_ref().ok_or("Сначала сделайте скриншот")?;
+        if self.blurred.is_none() && self.history.items.iter().any(|a| a.tool == Tool::Blur) {
+            return Err("Размытие ещё подготавливается. Повторите сохранение через секунду".into());
+        }
         let (x, y, w, h) =
             self.selection
                 .unwrap_or((0., 0., image.width() as f64, image.height() as f64));
@@ -352,10 +398,15 @@ impl State {
     }
 }
 
-fn draw_annotation(cr: &cairo::Context, a: &Annotation) -> Result<(), String> {
+fn draw_annotation(
+    cr: &cairo::Context,
+    a: &Annotation,
+    blurred: Option<&cairo::ImageSurface>,
+) -> Result<(), String> {
     cr.save().map_err(|e| e.to_string())?;
     cr.set_source_rgba(a.color.0, a.color.1, a.color.2, a.color.3);
     cr.set_line_width(a.width);
+    let world = cr.matrix();
     let m = a.matrix;
     cr.transform(cairo::Matrix::new(m[0], m[1], m[2], m[3], m[4], m[5]));
     cr.set_line_cap(cairo::LineCap::Round);
@@ -363,6 +414,21 @@ fn draw_annotation(cr: &cairo::Context, a: &Annotation) -> Result<(), String> {
     let (ex, ey) = a.end;
     match a.tool {
         Tool::Select => {}
+        Tool::Line => {
+            cr.move_to(x, y);
+            cr.line_to(ex, ey);
+            cr.stroke().map_err(|e| e.to_string())?;
+        }
+        Tool::Blur => {
+            if let Some(image) = blurred {
+                cr.rectangle(x.min(ex), y.min(ey), (ex - x).abs(), (ey - y).abs());
+                cr.clip();
+                cr.set_matrix(world);
+                cr.set_source_surface(image, 0., 0.)
+                    .map_err(|e| e.to_string())?;
+                cr.paint().map_err(|e| e.to_string())?;
+            }
+        }
         Tool::Pen => {
             cr.set_line_join(cairo::LineJoin::Round);
             cr.move_to(x, y);
@@ -417,13 +483,10 @@ fn draw_annotation(cr: &cairo::Context, a: &Annotation) -> Result<(), String> {
             }
         }
         Tool::Text => {
-            let layout = pangocairo::functions::create_layout(cr);
-            let mut font = gtk::pango::FontDescription::from_string("Sans");
-            font.set_absolute_size((a.width * 6. + 12.) * gtk::pango::SCALE as f64);
-            layout.set_font_description(Some(&font));
-            layout.set_text(&a.text);
-            cr.move_to(x, y);
-            pangocairo::functions::show_layout(cr, &layout);
+            let geometry = a.text_geometry()?;
+            cr.new_path();
+            cr.append_path(&geometry.path);
+            cr.fill().map_err(|e| e.to_string())?;
         }
     }
     cr.restore().map_err(|e| e.to_string())
@@ -460,6 +523,7 @@ impl Editor {
             busy: Rc::new(std::cell::Cell::new(false)),
             state: Rc::new(RefCell::new(State {
                 image: None,
+                blurred: None,
                 selection: None,
                 selecting: true,
                 anchor: None,
@@ -484,6 +548,8 @@ impl Editor {
             ("Выбор", Tool::Select),
             ("Перо", Tool::Pen),
             ("Стрелка", Tool::Arrow),
+            ("Линия", Tool::Line),
+            ("Размытие", Tool::Blur),
             ("Прямоугольник", Tool::Rectangle),
             ("Эллипс", Tool::Ellipse),
             ("Текст", Tool::Text),
@@ -501,7 +567,8 @@ impl Editor {
             let state = editor.state.clone();
             button.connect_toggled(move |b| {
                 if b.is_active() {
-                    state.borrow_mut().tool = tool;
+                    let mut state = state.borrow_mut();
+                    state.tool = tool;
                 }
             });
             toolbar.append(&button);
@@ -529,9 +596,15 @@ impl Editor {
                 .content_width(28)
                 .content_height(28)
                 .build();
-            swatch.set_draw_func(move |_, cr, _, _| {
+            swatch.set_draw_func(move |_, cr, width, height| {
                 cr.set_source_rgba(color.0, color.1, color.2, color.3);
-                cr.arc(14., 14., 10., 0., std::f64::consts::TAU);
+                cr.arc(
+                    width as f64 / 2.,
+                    height as f64 / 2.,
+                    10.,
+                    0.,
+                    std::f64::consts::TAU,
+                );
                 let _ = cr.fill_preserve();
                 cr.set_source_rgb(0.5, 0.5, 0.5);
                 cr.set_line_width(1.);
@@ -703,31 +776,35 @@ impl Editor {
                             cr.clip();
                         }
                         for item in &state.history.items {
-                            let _ = draw_annotation(&cr, item);
+                            let _ = draw_annotation(&cr, item, state.blurred.as_ref());
                         }
                         if let Some(item) = &state.draft {
-                            let _ = draw_annotation(&cr, item);
+                            let _ = draw_annotation(&cr, item, state.blurred.as_ref());
                         }
                         let _ = cr.restore();
                         if let Some(a) = state.selected.and_then(|i| state.history.items.get(i)) {
-                            let (x, y, w, h) = a.bounds();
-                            cr.rectangle(x, y, w, h);
-                            cr.set_source_rgb(0.4, 0.8, 1.);
+                            let handles = a.handles(t.scale);
+                            // Cairo paths survive save/restore, including text outlines.
+                            cr.new_path();
+                            cr.set_line_join(cairo::LineJoin::Miter);
+                            cr.set_line_cap(cairo::LineCap::Butt);
+                            cr.move_to(handles[0].0, handles[0].1);
+                            for index in [2, 4, 6] {
+                                cr.line_to(handles[index].0, handles[index].1);
+                            }
+                            cr.close_path();
+                            cr.set_source_rgb(0.65, 0.70, 0.88);
                             cr.set_line_width(1. / t.scale);
-                            cr.set_dash(&[4. / t.scale, 3. / t.scale], 0.);
                             let _ = cr.stroke();
-                            cr.set_dash(&[], 0.);
-                            cr.move_to(x + w / 2., y);
-                            cr.line_to(x + w / 2., y - 24. / t.scale);
+                            cr.move_to(handles[1].0, handles[1].1);
+                            cr.line_to(handles[8].0, handles[8].1);
                             let _ = cr.stroke();
-                            for (hx, hy) in a.handles(t.scale) {
-                                cr.rectangle(
-                                    hx - 4. / t.scale,
-                                    hy - 4. / t.scale,
-                                    8. / t.scale,
-                                    8. / t.scale,
-                                );
-                                let _ = cr.fill();
+                            for (hx, hy) in handles {
+                                cr.arc(hx, hy, 3.5 / t.scale, 0., std::f64::consts::TAU);
+                                cr.set_source_rgb(0.12, 0.12, 0.14);
+                                let _ = cr.fill_preserve();
+                                cr.set_source_rgb(0.78, 0.79, 0.88);
+                                let _ = cr.stroke();
                             }
                         }
                     }
@@ -834,8 +911,14 @@ impl Editor {
             }
             if state.tool == Tool::Select {
                 state.selected = state.history.items.iter().rposition(|a| {
-                    let (x, y, w, h) = a.bounds();
-                    point.0 >= x && point.1 >= y && point.0 <= x + w && point.1 <= y + h
+                    let (x, y, w, h) = a.raw_bounds();
+                    let m = a.matrix;
+                    let determinant = m[0] * m[3] - m[1] * m[2];
+                    let dx = point.0 - m[4];
+                    let dy = point.1 - m[5];
+                    let px = (m[3] * dx - m[2] * dy) / determinant;
+                    let py = (-m[1] * dx + m[0] * dy) / determinant;
+                    px >= x && py >= y && px <= x + w && py <= y + h
                 });
                 state.moving = state.selected.map(|i| (i, state.history.items[i].clone()));
                 drop(state);
@@ -933,36 +1016,45 @@ impl Editor {
                                 cy - sin * cx - cos * cy,
                             ])
                         } else {
+                            let (x, y, w, h) = original.raw_bounds();
+                            let m = original.matrix;
+                            let determinant = m[0] * m[3] - m[1] * m[2];
+                            let local_dx = (m[3] * dx - m[2] * dy) / (determinant * t.scale);
+                            let local_dy = (-m[1] * dx + m[0] * dy) / (determinant * t.scale);
                             let left = matches!(handle, 0 | 6 | 7);
                             let right = matches!(handle, 2..=4);
                             let top = matches!(handle, 0..=2);
                             let bottom = matches!(handle, 4..=6);
                             let nw = (w + if left {
-                                -dx / t.scale
+                                -local_dx
                             } else if right {
-                                dx / t.scale
+                                local_dx
                             } else {
                                 0.
                             })
                             .max(4.);
                             let nh = (h + if top {
-                                -dy / t.scale
+                                -local_dy
                             } else if bottom {
-                                dy / t.scale
+                                local_dy
                             } else {
                                 0.
                             })
                             .max(4.);
                             let ax = if left { x + w } else { x };
                             let ay = if top { y + h } else { y };
-                            original.transformed([
-                                nw / w,
-                                0.,
-                                0.,
-                                nh / h,
-                                ax * (1. - nw / w),
-                                ay * (1. - nh / h),
-                            ])
+                            let mut local = original.clone();
+                            local.matrix = [1., 0., 0., 1., 0., 0.];
+                            local
+                                .transformed([
+                                    nw / w,
+                                    0.,
+                                    0.,
+                                    nh / h,
+                                    ax * (1. - nw / w),
+                                    ay * (1. - nh / h),
+                                ])
+                                .transformed(original.matrix)
                         }
                     } else {
                         original.shifted(
@@ -1045,6 +1137,9 @@ impl Editor {
                 return;
             }
             if let Some(draft) = state.draft.take()
+                && (draft.tool != Tool::Blur
+                    || ((draft.end.0 - draft.start.0).abs() >= 1.
+                        && (draft.end.1 - draft.start.1).abs() >= 1.))
                 && ((draft.tool == Tool::Pen && draft.points.len() > 1)
                     || (draft.end.0 - draft.start.0).hypot(draft.end.1 - draft.start.1) >= 1.)
             {
@@ -1187,6 +1282,49 @@ impl Editor {
     pub fn load(&self, png: &[u8]) -> Result<(), String> {
         let image = cairo::ImageSurface::create_from_png(&mut std::io::Cursor::new(png))
             .map_err(|e| format!("Не удалось декодировать PNG: {e}"))?;
+        let source = png.to_vec();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<_, String> {
+                let source =
+                    cairo::ImageSurface::create_from_png(&mut std::io::Cursor::new(source))
+                        .map_err(|e| e.to_string())?;
+                let mut blurred = blur_image(&source)?;
+                let (width, height, stride) = (blurred.width(), blurred.height(), blurred.stride());
+                let pixels = blurred.data().map_err(|e| e.to_string())?.to_vec();
+                Ok((pixels, width, height, stride))
+            })();
+            let _ = sender.send(result);
+        });
+        let editor = self.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(30), move || match receiver
+            .try_recv()
+        {
+            Ok(result) => {
+                match result.and_then(|(pixels, width, height, stride)| {
+                    cairo::ImageSurface::create_for_data(
+                        pixels,
+                        cairo::Format::ARgb32,
+                        width,
+                        height,
+                        stride,
+                    )
+                    .map_err(|e| e.to_string())
+                }) {
+                    Ok(image) => editor.state.borrow_mut().blurred = Some(image),
+                    Err(error) => {
+                        editor
+                            .status
+                            .set_text(&format!("Не удалось подготовить размытие: {error}"));
+                        editor.status.set_visible(true);
+                    }
+                }
+                editor.area.queue_draw();
+                gtk::glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(_) => gtk::glib::ControlFlow::Break,
+        });
         // Upload the immutable screenshot once. Pointer motion only redraws annotations and masks.
         let mut texture_surface =
             cairo::ImageSurface::create(cairo::Format::ARgb32, image.width(), image.height())
@@ -1309,6 +1447,60 @@ impl Editor {
     }
 }
 
+// Separable sliding-window blur, cached once per screenshot. Work is linear in pixels.
+fn blur_image(source: &cairo::ImageSurface) -> Result<cairo::ImageSurface, String> {
+    let (width, height) = (source.width() as usize, source.height() as usize);
+    let mut image =
+        cairo::ImageSurface::create(cairo::Format::ARgb32, source.width(), source.height())
+            .map_err(|e| e.to_string())?;
+    {
+        let cr = cairo::Context::new(&image).map_err(|e| e.to_string())?;
+        cr.set_source_surface(source, 0., 0.)
+            .map_err(|e| e.to_string())?;
+        cr.paint().map_err(|e| e.to_string())?;
+    }
+    let stride = image.stride() as usize;
+    {
+        let mut data = image.data().map_err(|e| e.to_string())?;
+        let mut scratch = vec![0_u8; data.len()];
+        for _ in 0..2 {
+            blur_pass(&data, &mut scratch, width, height, stride, false);
+            blur_pass(&scratch, &mut data, width, height, stride, true);
+        }
+    }
+    image.mark_dirty();
+    Ok(image)
+}
+
+fn blur_pass(
+    input: &[u8],
+    output: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    vertical: bool,
+) {
+    let radius = 8_isize;
+    let (lines, length, step, line_step) = if vertical {
+        (width, height, stride, 4)
+    } else {
+        (height, width, 4, stride)
+    };
+    for line in 0..lines {
+        for channel in 0..4 {
+            let offset = line * line_step + channel;
+            let at =
+                |position: isize| offset + position.clamp(0, length as isize - 1) as usize * step;
+            let mut sum: u32 = (-radius..=radius).map(|p| input[at(p)] as u32).sum();
+            for position in 0..length {
+                output[offset + position * step] = (sum / (radius as u32 * 2 + 1)) as u8;
+                sum -= input[at(position as isize - radius)] as u32;
+                sum += input[at(position as isize + radius + 1)] as u32;
+            }
+        }
+    }
+}
+
 fn save_png(png: &[u8]) -> Result<std::path::PathBuf, String> {
     let directory = gtk::glib::home_dir().join("Pictures/screenshots");
     save_png_in(png, &directory)
@@ -1353,6 +1545,128 @@ fn save_png_in(png: &[u8], directory: &std::path::Path) -> Result<std::path::Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transformed_text_pixels_stay_inside_selection_frame() {
+        for matrix in [
+            [2.5, 0., 0., 1.5, 20., 10.],
+            [1.4, 0.7, -0.2, 0.4, 90., 20.],
+            [0.15, -0.1, 0.5, 2., 90., 100.],
+        ] {
+            let annotation = Annotation {
+                tool: Tool::Text,
+                start: (10., 20.),
+                end: (10., 20.),
+                color: (1., 0., 0., 1.),
+                width: 4.,
+                text: "lol123".into(),
+                points: vec![],
+                matrix,
+            };
+            let (x, y, w, h) = annotation.bounds();
+            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 400).unwrap();
+            {
+                let cr = cairo::Context::new(&surface).unwrap();
+                draw_annotation(&cr, &annotation, None).unwrap();
+            }
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            let alpha = if cfg!(target_endian = "little") { 3 } else { 0 };
+            let mut count = 0;
+            for py in 0..400 {
+                for px in 0..600 {
+                    if data[py * stride + px * 4 + alpha] > 0 {
+                        count += 1;
+                        assert!(px as f64 >= x.floor() - 1. && px as f64 <= (x + w).ceil() + 1.);
+                        assert!(py as f64 >= y.floor() - 1. && py as f64 <= (y + h).ceil() + 1.);
+                    }
+                }
+            }
+            assert!(count > 0);
+        }
+    }
+
+    #[test]
+    fn blur_frame_matches_mask_in_both_drag_directions() {
+        for (start, end) in [((20., 30.), (80., 60.)), ((80., 60.), (20., 30.))] {
+            let annotation = Annotation {
+                tool: Tool::Blur,
+                start,
+                end,
+                color: (0., 0., 0., 1.),
+                width: 4.,
+                text: String::new(),
+                points: vec![start],
+                matrix: [1., 0., 0., 1., 0., 0.],
+            };
+            assert_eq!(annotation.raw_bounds(), (20., 30., 60., 30.));
+            let handles = annotation.handles(1.);
+            assert_eq!(handles[0], (20., 30.));
+            assert_eq!(handles[4], (80., 60.));
+        }
+    }
+
+    #[test]
+    fn selection_handles_rotate_with_object() {
+        let object = Annotation {
+            tool: Tool::Rectangle,
+            start: (20., 30.),
+            end: (60., 50.),
+            color: (1., 0., 0., 1.),
+            width: 2.,
+            text: String::new(),
+            points: vec![],
+            matrix: [1., 0., 0., 1., 0., 0.],
+        };
+        let original = object.handles(1.);
+        let rotated = object.transformed([0., 1., -1., 0., 100., 0.]).handles(1.);
+        for (before, after) in original.into_iter().zip(rotated) {
+            assert!((after.0 - (100. - before.1)).abs() < 0.001);
+            assert!((after.1 - before.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn blur_softens_edges_and_respects_mask() {
+        let source = cairo::ImageSurface::create(cairo::Format::ARgb32, 80, 40).unwrap();
+        {
+            let cr = cairo::Context::new(&source).unwrap();
+            cr.set_source_rgb(0., 0., 0.);
+            cr.paint().unwrap();
+            cr.set_source_rgb(1., 1., 1.);
+            cr.rectangle(40., 0., 40., 40.);
+            cr.fill().unwrap();
+        }
+        let blurred = blur_image(&source).unwrap();
+        let mut result = cairo::ImageSurface::create(cairo::Format::ARgb32, 80, 40).unwrap();
+        {
+            let cr = cairo::Context::new(&result).unwrap();
+            cr.set_source_surface(&source, 0., 0.).unwrap();
+            cr.paint().unwrap();
+            draw_annotation(
+                &cr,
+                &Annotation {
+                    tool: Tool::Blur,
+                    start: (30., 10.),
+                    end: (50., 30.),
+                    color: (1., 0., 0., 1.),
+                    width: 4.,
+                    text: String::new(),
+                    points: vec![],
+                    matrix: [1., 0., 0., 1., 0., 0.],
+                },
+                Some(&blurred),
+            )
+            .unwrap();
+        }
+        let stride = result.stride() as usize;
+        let data = result.data().unwrap();
+        let channel = if cfg!(target_endian = "little") { 0 } else { 1 };
+        let value = data[20 * stride + 39 * 4 + channel];
+        assert!(value > 0 && value < 255);
+        assert_eq!(data[5 * stride + 39 * 4 + channel], 0);
+        assert_eq!(data[5 * stride + 40 * 4 + channel], 255);
+    }
+
     #[test]
     fn region_and_objects_undo_together() {
         let mut history = History::default();
@@ -1400,6 +1714,7 @@ mod tests {
         cr.paint().unwrap();
         let mut state = State {
             image: Some(image),
+            blurred: None,
             selection: None,
             selecting: false,
             anchor: None,
@@ -1419,7 +1734,13 @@ mod tests {
             width: 4.,
         };
         let original = state.png().unwrap();
-        for tool in [Tool::Arrow, Tool::Rectangle, Tool::Ellipse, Tool::Text] {
+        for tool in [
+            Tool::Arrow,
+            Tool::Line,
+            Tool::Rectangle,
+            Tool::Ellipse,
+            Tool::Text,
+        ] {
             state.history.push(Annotation {
                 tool,
                 start: (10., 10.),
@@ -1436,11 +1757,11 @@ mod tests {
         let decoded =
             cairo::ImageSurface::create_from_png(&mut std::io::Cursor::new(&annotated)).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (160, 100));
-        for _ in 0..4 {
+        for _ in 0..state.history.items.len() {
             state.history.undo();
         }
         assert_eq!(state.png().unwrap(), original);
-        for _ in 0..4 {
+        for _ in 0..state.history.redo.len() {
             state.history.redo();
         }
         assert_eq!(state.png().unwrap(), annotated);
@@ -1450,6 +1771,7 @@ mod tests {
         let image = cairo::ImageSurface::create(cairo::Format::ARgb32, 200, 100).unwrap();
         let mut state = State {
             image: Some(image),
+            blurred: None,
             selection: Some((30., 20., 60., 40.)),
             selecting: false,
             anchor: None,
