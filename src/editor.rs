@@ -730,7 +730,7 @@ impl Editor {
         let done = icon_button("done", "Сохранить и скопировать — Enter");
         done.add_css_class("suggested-action");
         let e = editor.clone();
-        done.connect_clicked(move |_| e.action("savecopy"));
+        done.connect_clicked(move |_| e.action("both"));
         actions.append(&done);
         let overlay = gtk::Overlay::new();
 
@@ -1522,7 +1522,7 @@ impl Editor {
         self.status.set_text("Выполняется…");
         let copy = action == "copy";
         let close_after = action == "both";
-        let both = close_after || action == "savecopy";
+        let both = close_after;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = if both {
