@@ -82,3 +82,7 @@ Ctrl shortcuts work across keyboard layouts. Standard text-field shortcuts apply
 The `~/Pictures/screenshots/` directory is created automatically. Files have unique names and preserve the selected region's resolution. Saving sends a notification with a thumbnail and the file location. Notifications require a running notification service.
 
 The desktop image is captured when the app launches. Each screenshot region is limited to one monitor. If saving or copying fails, the editor displays an error and stays open.
+
+## License
+
+[MIT](LICENSE)
