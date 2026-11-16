@@ -4,7 +4,7 @@ English · [Русский](README.ru.md)
 
 [![CI](https://github.com/LeezyWannaFall/UmbrellaScreen/actions/workflows/ci.yml/badge.svg)](https://github.com/LeezyWannaFall/UmbrellaScreen/actions/workflows/ci.yml)
 
-A screenshot app for **Arch Linux with Hyprland**. Select and edit a region directly over your desktop.
+A screenshot app for **Hyprland**. Select and edit a region directly over your desktop.
 
 Select a region with the mouse, add annotations, and press **Enter**. The PNG is saved to `~/Pictures/screenshots/`, copied to the clipboard, and the editor closes.
 
