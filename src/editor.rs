@@ -1458,8 +1458,17 @@ fn notify_saved(path: &std::path::Path) -> Result<(), String> {
         path.parent().unwrap().display(),
         path.file_name().unwrap().to_string_lossy()
     );
-    let icon = notification_icon()?;
-    let hints = std::collections::HashMap::<String, glib::Variant>::new();
+    let mut hints = std::collections::HashMap::<String, glib::Variant>::new();
+    let icon = match notification_preview(path) {
+        Ok(preview) => {
+            hints.insert("image-data".into(), preview);
+            path.to_path_buf()
+        }
+        Err(error) => {
+            eprintln!("Миниатюра уведомления: {error}");
+            notification_icon()?
+        }
+    };
     let parameters = (
         "UmbrellaScreen",
         0_u32,
@@ -1485,6 +1494,51 @@ fn notify_saved(path: &std::path::Path) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn notification_preview(path: &std::path::Path) -> Result<gtk::glib::Variant, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let source = cairo::ImageSurface::create_from_png(&mut file).map_err(|e| e.to_string())?;
+    let scale = (256. / source.width().max(source.height()) as f64).min(1.);
+    let width = (source.width() as f64 * scale).round().max(1.) as i32;
+    let height = (source.height() as f64 * scale).round().max(1.) as i32;
+    let mut image = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)
+        .map_err(|e| e.to_string())?;
+    {
+        let cr = cairo::Context::new(&image).map_err(|e| e.to_string())?;
+        cr.scale(
+            width as f64 / source.width() as f64,
+            height as f64 / source.height() as f64,
+        );
+        cr.set_source_surface(&source, 0., 0.)
+            .map_err(|e| e.to_string())?;
+        cr.source().set_filter(cairo::Filter::Best);
+        cr.paint().map_err(|e| e.to_string())?;
+    }
+    let stride = image.stride() as usize;
+    let bytes = image.data().map_err(|e| e.to_string())?;
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for row in 0..height as usize {
+        for pixel in bytes[row * stride..row * stride + width as usize * 4]
+            .as_chunks::<4>()
+            .0
+        {
+            let argb = u32::from_ne_bytes(*pixel);
+            let alpha = argb >> 24;
+            // D-Bus expects straight RGBA, Cairo stores native-endian premultiplied ARGB.
+            for shift in [16, 8, 0] {
+                let channel = (argb >> shift) & 255;
+                pixels.push(
+                    (channel * 255 + alpha / 2)
+                        .checked_div(alpha)
+                        .unwrap_or(0)
+                        .min(255) as u8,
+                );
+            }
+            pixels.push(alpha as u8);
+        }
+    }
+    Ok((width, height, width * 4, true, 8_i32, 4_i32, pixels).to_variant())
 }
 
 fn notification_icon() -> Result<std::path::PathBuf, String> {
@@ -1604,6 +1658,29 @@ fn save_png_in(png: &[u8], directory: &std::path::Path) -> Result<std::path::Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notification_preview_is_bounded_packed_rgba() {
+        let directory =
+            std::env::temp_dir().join(format!("umbrella-preview-{}", std::process::id()));
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 600, 300).unwrap();
+        let mut png = Vec::new();
+        surface.write_to_png(&mut png).unwrap();
+        let path = save_png_in(&png, &directory).unwrap();
+        let preview = notification_preview(&path).unwrap();
+        assert_eq!(preview.type_().as_str(), "(iiibiiay)");
+        assert_eq!(preview.child_value(0).get::<i32>(), Some(256));
+        assert_eq!(preview.child_value(1).get::<i32>(), Some(128));
+        let stride = preview.child_value(2).get::<i32>().unwrap();
+        let channels = preview.child_value(5).get::<i32>().unwrap();
+        assert_eq!(stride, 256 * channels);
+        assert_eq!(
+            preview.child_value(6).get::<Vec<u8>>().unwrap().len(),
+            (stride * 128) as usize
+        );
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
     #[test]
     fn transformed_text_pixels_stay_inside_selection_frame() {
         for matrix in [
