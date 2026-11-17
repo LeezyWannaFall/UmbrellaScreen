@@ -12,21 +12,22 @@ Select a region with the mouse, add annotations, and press **Enter**. The PNG is
 
 ## Installation
 
-Install the dependencies and build the app
+Install the dependencies and clone the repository
 
 ```sh
 sudo pacman -S --needed base-devel git rust pkgconf gtk4 gtk4-layer-shell grim wl-clipboard
 
 git clone https://github.com/LeezyWannaFall/UmbrellaScreen.git
 cd UmbrellaScreen
-cargo build --release --locked
 ```
 
-Copy the executable to your local applications directory
+Build and install with one command
 
 ```sh
-install -Dm755 target/release/umbrellascreen ~/.local/bin/umbrellascreen
+make install
 ```
+
+The executable is installed to `~/.local/bin/umbrellascreen`. Run `make install` again after updating the source to install the new version.
 
 ## Launch
 

@@ -12,21 +12,22 @@
 
 ## Установка
 
-Установите зависимости и соберите приложение
+Установите зависимости и клонируйте репозиторий
 
 ```sh
 sudo pacman -S --needed base-devel git rust pkgconf gtk4 gtk4-layer-shell grim wl-clipboard
 
 git clone https://github.com/LeezyWannaFall/UmbrellaScreen.git
 cd UmbrellaScreen
-cargo build --release --locked
 ```
 
-Скопируйте исполняемый файл в пользовательский каталог программ
+Соберите и установите приложение одной командой
 
 ```sh
-install -Dm755 target/release/umbrellascreen ~/.local/bin/umbrellascreen
+make install
 ```
+
+Программа устанавливается в `~/.local/bin/umbrellascreen`. После обновления исходников повторите `make install`, чтобы установить новую версию.
 
 ## Запуск
 
