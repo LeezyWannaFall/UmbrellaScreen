@@ -36,6 +36,8 @@ fn stylesheet(json: &str) -> Option<String> {
     };
     Some(format!(
         r#"
+        @define-color umbrella_handle_surface {surface};
+        .umbrella .selection-canvas {{ color: {accent}; }}
         window.umbrella {{ background: {background}; color: {text}; }}
         .umbrella .editor-panel {{ background: alpha({surface}, 0.97); color: {text};
             border: 1px solid alpha({muted}, 0.22); border-radius: 20px;

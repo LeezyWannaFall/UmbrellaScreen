@@ -216,6 +216,31 @@ struct TextGeometry {
 }
 
 impl Annotation {
+    fn aligned_line(&self) -> Self {
+        if !matches!(self.tool, Tool::Line | Tool::Arrow) {
+            return self.clone();
+        }
+        let dx = self.end.0 - self.start.0;
+        let dy = self.end.1 - self.start.1;
+        let length = dx.hypot(dy);
+        if length < 0.001 {
+            return self.clone();
+        }
+        let mut aligned = self.clone();
+        aligned.start = (0., 0.);
+        aligned.end = (length, 0.);
+        aligned.points.clear();
+        aligned.matrix = [
+            dx / length,
+            dy / length,
+            -dy / length,
+            dx / length,
+            self.start.0,
+            self.start.1,
+        ];
+        aligned.transformed(self.matrix)
+    }
+
     fn text_geometry(&self) -> Result<TextGeometry, String> {
         // Build glyph outlines in image coordinates, independent of preview/object transforms.
         let surface =
@@ -237,6 +262,23 @@ impl Annotation {
     }
 
     fn raw_bounds(&self) -> (f64, f64, f64, f64) {
+        if matches!(self.tool, Tool::Line | Tool::Arrow) && self.start.1 == self.end.1 {
+            let padding = (self.width / 2.).max(4.);
+            let head = if self.tool == Tool::Arrow {
+                (self.width * 4.)
+                    .max(12.)
+                    .min((self.end.0 - self.start.0).abs() * 0.5)
+                    * 0.5_f64.sin()
+            } else {
+                0.
+            };
+            return (
+                self.start.0.min(self.end.0) - padding,
+                self.start.1 - head - padding,
+                (self.end.0 - self.start.0).abs() + 2. * padding,
+                2. * (head + padding),
+            );
+        }
         if self.tool == Tool::Blur {
             return (
                 self.start.0.min(self.end.0),
@@ -264,8 +306,9 @@ impl Annotation {
         )
     }
     fn bounds(&self) -> (f64, f64, f64, f64) {
-        let (x, y, w, h) = self.raw_bounds();
-        let m = self.matrix;
+        let aligned = self.aligned_line();
+        let (x, y, w, h) = aligned.raw_bounds();
+        let m = aligned.matrix;
         let points = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
             .map(|(x, y)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]));
         let minx = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
@@ -291,8 +334,9 @@ impl Annotation {
         self.transformed([1., 0., 0., 1., dx, dy])
     }
     fn handles(&self, scale: f64) -> [(f64, f64); 9] {
-        let (x, y, w, h) = self.raw_bounds();
-        let m = self.matrix;
+        let aligned = self.aligned_line();
+        let (x, y, w, h) = aligned.raw_bounds();
+        let m = aligned.matrix;
         let vertical_scale = m[2].hypot(m[3]).max(0.001);
         [
             (x, y),
@@ -402,7 +446,11 @@ impl State {
         if let Some(drag) = &self.moving {
             return Some(drag.current.clone());
         }
-        let first = self.history.items.get(*self.selected.first()?)?.clone();
+        let first = self
+            .history
+            .items
+            .get(*self.selected.first()?)?
+            .aligned_line();
         if self.selected.len() == 1 {
             return Some(first);
         }
@@ -670,10 +718,14 @@ impl Editor {
                 group = Some(button.clone());
             }
             let state = editor.state.clone();
+            let area = editor.area.clone();
             button.connect_toggled(move |b| {
                 if b.is_active() {
                     let mut state = state.borrow_mut();
                     state.tool = tool;
+                    state.selected.clear();
+                    drop(state);
+                    area.queue_draw();
                 }
             });
             toolbar.append(&button);
@@ -794,6 +846,7 @@ impl Editor {
         let overlay = gtk::Overlay::new();
 
         overlay.set_child(Some(&editor.background));
+        editor.area.add_css_class("selection-canvas");
         editor.area.set_hexpand(true);
         editor.area.set_vexpand(true);
         overlay.add_overlay(&editor.area);
@@ -894,7 +947,20 @@ impl Editor {
         let coordinate_layout = editor.area.create_pango_layout(None);
         editor
             .area
-            .set_draw_func(move |_, snapshot, width, height| {
+            .set_draw_func(move |area, snapshot, width, height| {
+                let style = area.style_context();
+                let accent = style.color();
+                let handle_surface = style
+                    .lookup_color("umbrella_handle_surface")
+                    .unwrap_or_else(|| gdk::RGBA::new(0.12, 0.12, 0.14, 1.));
+                let set_color = |cr: &cairo::Context, color: &gdk::RGBA| {
+                    cr.set_source_rgba(
+                        color.red() as f64,
+                        color.green() as f64,
+                        color.blue() as f64,
+                        color.alpha() as f64,
+                    );
+                };
                 let state = state.borrow();
                 if let Some(image) = &state.image {
                     let t = Transform::fit(
@@ -936,7 +1002,7 @@ impl Editor {
                                 cr.line_to(handles[index].0, handles[index].1);
                             }
                             cr.close_path();
-                            cr.set_source_rgb(0.65, 0.70, 0.88);
+                            set_color(&cr, &accent);
                             cr.set_line_width(1. / t.scale);
                             let _ = cr.stroke();
                             cr.move_to(handles[1].0, handles[1].1);
@@ -944,9 +1010,9 @@ impl Editor {
                             let _ = cr.stroke();
                             for (hx, hy) in handles {
                                 cr.arc(hx, hy, 3.5 / t.scale, 0., std::f64::consts::TAU);
-                                cr.set_source_rgb(0.12, 0.12, 0.14);
+                                set_color(&cr, &handle_surface);
                                 let _ = cr.fill_preserve();
-                                cr.set_source_rgb(0.78, 0.79, 0.88);
+                                set_color(&cr, &accent);
                                 let _ = cr.stroke();
                             }
                         }
@@ -973,7 +1039,7 @@ impl Editor {
                         ] {
                             snapshot.append_color(&color, &r);
                         }
-                        let border = gdk::RGBA::new(0.75, 0.82, 1., 1.);
+                        let border = accent;
                         for r in [
                             rect(x, y, w, 1.),
                             rect(x, y + h - 1., w, 1.),
@@ -984,10 +1050,8 @@ impl Editor {
                         }
                         if !state.selecting && state.tool == Tool::Select {
                             for (hx, hy) in region_handles((x, y, w, h)) {
-                                snapshot.append_color(
-                                    &gdk::RGBA::new(0.12, 0.12, 0.14, 1.),
-                                    &rect(hx - 4., hy - 4., 8., 8.),
-                                );
+                                snapshot
+                                    .append_color(&handle_surface, &rect(hx - 4., hy - 4., 8., 8.));
                                 snapshot.append_color(&border, &rect(hx - 3., hy - 3., 6., 6.));
                             }
                         }
@@ -1081,8 +1145,9 @@ impl Editor {
             }
             if state.tool == Tool::Select {
                 let hit = state.history.items.iter().rposition(|a| {
-                    let (x, y, w, h) = a.raw_bounds();
-                    let m = a.matrix;
+                    let aligned = a.aligned_line();
+                    let (x, y, w, h) = aligned.raw_bounds();
+                    let m = aligned.matrix;
                     let determinant = m[0] * m[3] - m[1] * m[2];
                     let dx = point.0 - m[4];
                     let dy = point.1 - m[5];
@@ -1879,6 +1944,33 @@ fn save_png_in(png: &[u8], directory: &std::path::Path) -> Result<std::path::Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagonal_line_frames_follow_direction() {
+        for tool in [Tool::Line, Tool::Arrow] {
+            for (start, end) in [((20., 80.), (100., 20.)), ((100., 20.), (20., 80.))] {
+                let a = Annotation {
+                    tool,
+                    start,
+                    end,
+                    color: (1., 0., 0., 1.),
+                    width: 4.,
+                    text: String::new(),
+                    points: vec![start, end],
+                    matrix: [1., 0., 0., 1., 0., 0.],
+                };
+                let handles = a.handles(1.);
+                let edge = (handles[2].0 - handles[0].0, handles[2].1 - handles[0].1);
+                let direction = (end.0 - start.0, end.1 - start.1);
+                assert!((edge.0 * direction.1 - edge.1 * direction.0).abs() < 0.001);
+                let aligned = a.aligned_line();
+                let m = aligned.matrix;
+                assert!((m[0] * aligned.end.0 + m[4] - end.0).abs() < 0.001);
+                assert!((m[1] * aligned.end.0 + m[5] - end.1).abs() < 0.001);
+                assert!(aligned.raw_bounds().3 < 40.);
+            }
+        }
+    }
+
     #[test]
     fn group_selection_and_hidden_objects() {
         let image = cairo::ImageSurface::create(cairo::Format::ARgb32, 300, 200).unwrap();
