@@ -373,6 +373,13 @@ fn resize_region(
     (left, top, right - left, bottom - top)
 }
 
+#[derive(Clone)]
+struct ObjectDrag {
+    frame: Annotation,
+    current: Annotation,
+    originals: Vec<(usize, Annotation)>,
+}
+
 struct State {
     image: Option<cairo::ImageSurface>,
     blurred: Option<cairo::ImageSurface>,
@@ -380,8 +387,8 @@ struct State {
     selecting: bool,
     anchor: Option<(f64, f64)>,
     history: History<Annotation>,
-    selected: Option<usize>,
-    moving: Option<(usize, Annotation)>,
+    selected: Vec<usize>,
+    moving: Option<ObjectDrag>,
     handle: Option<usize>,
     region_drag: Option<(f64, f64, f64, f64)>,
     region_handle: Option<usize>,
@@ -391,6 +398,58 @@ struct State {
     width: f64,
 }
 impl State {
+    fn selection_frame(&self) -> Option<Annotation> {
+        if let Some(drag) = &self.moving {
+            return Some(drag.current.clone());
+        }
+        let first = self.history.items.get(*self.selected.first()?)?.clone();
+        if self.selected.len() == 1 {
+            return Some(first);
+        }
+        let (mut x, mut y, w, h) = first.bounds();
+        let (mut right, mut bottom) = (x + w, y + h);
+        for &index in &self.selected[1..] {
+            let (ax, ay, aw, ah) = self.history.items[index].bounds();
+            x = x.min(ax);
+            y = y.min(ay);
+            right = right.max(ax + aw);
+            bottom = bottom.max(ay + ah);
+        }
+        Some(Annotation {
+            tool: Tool::Blur,
+            start: (x, y),
+            end: (right, bottom),
+            matrix: [1., 0., 0., 1., 0., 0.],
+            points: vec![],
+            ..first
+        })
+    }
+
+    fn begin_object_drag(&mut self) {
+        self.moving = self.selection_frame().map(|frame| ObjectDrag {
+            current: frame.clone(),
+            frame,
+            originals: self
+                .selected
+                .iter()
+                .map(|&i| (i, self.history.items[i].clone()))
+                .collect(),
+        });
+    }
+
+    fn deselect_hidden(&mut self) {
+        let Some((x, y, w, h)) = self.selection else {
+            self.selected.clear();
+            return;
+        };
+        self.selected.retain(|&i| {
+            self.history.items.get(i).is_some_and(|a| {
+                let (ax, ay, aw, ah) = a.bounds();
+                ax < x + w && ax + aw > x && ay < y + h && ay + ah > y
+            })
+        });
+    }
+
     fn transform(&self, area: &crate::canvas::Canvas) -> Option<Transform> {
         self.image.as_ref().map(|i| {
             Transform::fit(
@@ -578,7 +637,7 @@ impl Editor {
                     undo: vec![],
                     region: None,
                 },
-                selected: None,
+                selected: vec![],
                 moving: None,
                 handle: None,
                 region_drag: None,
@@ -777,12 +836,11 @@ impl Editor {
                 .map_or(0., |last| (now - last) as f64 / 1_000_000.);
             let state = state.borrow();
             let active = state.draft.is_some() || state.moving.is_some();
-            let object = state.draft.as_ref().or_else(|| {
-                state
-                    .moving
-                    .as_ref()
-                    .and_then(|(index, _)| state.history.items.get(*index))
-            });
+            let selected_frame = state.selection_frame();
+            let object = state
+                .draft
+                .as_ref()
+                .or(selected_frame.as_ref().filter(|_| active));
             let bounds = object.zip(state.transform(area)).map(|(object, t)| {
                 let (x, y, w, h) = object.bounds();
                 gtk::graphene::Rect::new(
@@ -821,7 +879,7 @@ impl Editor {
             state.selecting = true;
             state.selection = None;
             state.anchor = None;
-            state.selected = None;
+            state.selected.clear();
             state.moving = None;
             state.history.undo.clear();
             state.history.items.clear();
@@ -845,7 +903,7 @@ impl Editor {
                     );
                     if !state.history.items.is_empty()
                         || state.draft.is_some()
-                        || state.selected.is_some()
+                        || !state.selected.is_empty()
                     {
                         let cr = snapshot.append_cairo(&gtk::graphene::Rect::new(
                             0.,
@@ -867,7 +925,7 @@ impl Editor {
                             let _ = draw_annotation(&cr, item, state.blurred.as_ref());
                         }
                         let _ = cr.restore();
-                        if let Some(a) = state.selected.and_then(|i| state.history.items.get(i)) {
+                        if let Some(a) = state.selection_frame() {
                             let handles = a.handles(t.scale);
                             // Cairo paths survive save/restore, including text outlines.
                             cr.new_path();
@@ -970,16 +1028,19 @@ impl Editor {
             state.handle = None;
             state.region_handle = None;
             if state.tool == Tool::Select
-                && let Some(i) = state.selected
+                && !gesture
+                    .current_event_state()
+                    .intersects(gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::CONTROL_MASK)
+                && let Some(frame) = state.selection_frame()
             {
-                state.handle = state.history.items[i]
+                state.handle = frame
                     .handles(state.transform(&e.area).unwrap().scale)
                     .iter()
                     .position(|&(x, y)| {
                         (point.0 - x).abs() < tolerance && (point.1 - y).abs() < tolerance
                     });
                 if state.handle.is_some() {
-                    state.moving = Some((i, state.history.items[i].clone()));
+                    state.begin_object_drag();
                     return;
                 }
             }
@@ -1019,7 +1080,7 @@ impl Editor {
                 }
             }
             if state.tool == Tool::Select {
-                state.selected = state.history.items.iter().rposition(|a| {
+                let hit = state.history.items.iter().rposition(|a| {
                     let (x, y, w, h) = a.raw_bounds();
                     let m = a.matrix;
                     let determinant = m[0] * m[3] - m[1] * m[2];
@@ -1029,7 +1090,24 @@ impl Editor {
                     let py = (-m[1] * dx + m[0] * dy) / determinant;
                     px >= x && py >= y && px <= x + w && py <= y + h
                 });
-                state.moving = state.selected.map(|i| (i, state.history.items[i].clone()));
+                let additive = gesture
+                    .current_event_state()
+                    .intersects(gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::CONTROL_MASK);
+                if let Some(index) = hit {
+                    if additive && state.selected.contains(&index) {
+                        state.selected.retain(|&i| i != index);
+                    } else {
+                        if !additive && !state.selected.contains(&index) {
+                            state.selected.clear();
+                        }
+                        if !state.selected.contains(&index) {
+                            state.selected.push(index);
+                        }
+                        state.begin_object_drag();
+                    }
+                } else if !additive {
+                    state.selected.clear();
+                }
                 drop(state);
                 e.area.queue_draw();
                 return;
@@ -1071,6 +1149,7 @@ impl Editor {
                         (image.width() as f64, image.height() as f64),
                     ));
                     state.history.region = state.selection;
+                    state.deselect_hidden();
                     drop(state);
                     e.area.queue_draw();
                     return;
@@ -1114,7 +1193,8 @@ impl Editor {
                 e.area.queue_draw();
                 return;
             }
-            if let Some((i, original)) = state.moving.clone() {
+            if let Some(drag) = state.moving.clone() {
+                let original = drag.frame;
                 if let Some(t) = state.transform(&e.area) {
                     let (x, y, w, h) = original.bounds();
                     let (sx, sy, sw, sh) = state.selection.unwrap();
@@ -1192,7 +1272,22 @@ impl Editor {
                         (sx - bx).max(0.) - (bx + bw - sx - sw).max(0.),
                         (sy - by).max(0.) - (by + bh - sy - sh).max(0.),
                     );
-                    state.history.items[i] = changed;
+                    let m = original.matrix;
+                    let det = m[0] * m[3] - m[1] * m[2];
+                    let mut inverse = original.clone();
+                    inverse.matrix = [
+                        m[3] / det,
+                        -m[1] / det,
+                        -m[2] / det,
+                        m[0] / det,
+                        (m[2] * m[5] - m[3] * m[4]) / det,
+                        (m[1] * m[4] - m[0] * m[5]) / det,
+                    ];
+                    let delta = inverse.transformed(changed.matrix).matrix;
+                    for (index, item) in drag.originals {
+                        state.history.items[index] = item.transformed(delta);
+                    }
+                    state.moving.as_mut().unwrap().current = changed;
                 }
                 drop(state);
                 e.area.queue_draw();
@@ -1243,16 +1338,18 @@ impl Editor {
                 e.area.queue_draw();
                 return;
             }
-            if let Some((i, original)) = state.moving.take() {
-                let changed = state.history.items[i].clone();
-                state.history.items[i] = original.clone();
-                if changed.matrix != original.matrix
-                    || changed.start != original.start
-                    || changed.end != original.end
-                    || changed.width != original.width
-                {
+            if let Some(drag) = state.moving.take() {
+                let changed = state.history.items.clone();
+                let modified = drag
+                    .originals
+                    .iter()
+                    .any(|(i, a)| changed[*i].matrix != a.matrix);
+                if modified {
+                    for (i, original) in drag.originals {
+                        state.history.items[i] = original;
+                    }
                     state.history.checkpoint();
-                    state.history.items[i] = changed;
+                    state.history.items = changed;
                 }
                 drop(state);
                 e.area.queue_draw();
@@ -1278,8 +1375,10 @@ impl Editor {
                 state.history.undo();
                 state.selection = Some(region);
             }
-            if let Some((i, original)) = state.moving.take() {
-                state.history.items[i] = original;
+            if let Some(drag) = state.moving.take() {
+                for (i, original) in drag.originals {
+                    state.history.items[i] = original;
+                }
             }
             drop(state);
             e.area.queue_draw();
@@ -1299,11 +1398,13 @@ impl Editor {
             }
             if key == gdk::Key::Delete || key == gdk::Key::BackSpace {
                 let mut state = e.state.borrow_mut();
-                if let Some(i) = state.selected.take()
-                    && i < state.history.items.len()
-                {
+                if !state.selected.is_empty() {
                     state.history.checkpoint();
-                    state.history.items.remove(i);
+                    let mut selected = std::mem::take(&mut state.selected);
+                    selected.sort_unstable();
+                    for i in selected.into_iter().rev() {
+                        state.history.items.remove(i);
+                    }
                 }
                 drop(state);
                 e.area.queue_draw();
@@ -1479,7 +1580,7 @@ impl Editor {
         ));
         let mut state = self.state.borrow_mut();
         state.image = Some(image);
-        state.selected = None;
+        state.selected.clear();
         state.moving = None;
         state.history.undo.clear();
         state.history.items.clear();
@@ -1493,7 +1594,7 @@ impl Editor {
     fn action(&self, action: &str) {
         if action == "undo" || action == "redo" {
             let mut state = self.state.borrow_mut();
-            state.selected = None;
+            state.selected.clear();
             if action == "undo" {
                 state.history.undo();
             } else {
@@ -1779,6 +1880,60 @@ fn save_png_in(png: &[u8], directory: &std::path::Path) -> Result<std::path::Pat
 mod tests {
     use super::*;
     #[test]
+    fn group_selection_and_hidden_objects() {
+        let image = cairo::ImageSurface::create(cairo::Format::ARgb32, 300, 200).unwrap();
+        let mut state = State {
+            image: Some(image),
+            blurred: None,
+            selection: None,
+            selecting: false,
+            anchor: None,
+            history: History {
+                items: vec![],
+                redo: vec![],
+                undo: vec![],
+                region: None,
+            },
+            selected: vec![],
+            moving: None,
+            handle: None,
+            region_drag: None,
+            region_handle: None,
+            draft: None,
+            tool: Tool::Rectangle,
+            color: (1., 0., 0., 1.),
+            width: 4.,
+        };
+        let first = Annotation {
+            tool: Tool::Blur,
+            start: (10., 10.),
+            end: (40., 40.),
+            color: (1., 0., 0., 1.),
+            width: 4.,
+            text: String::new(),
+            points: vec![],
+            matrix: [1., 0., 0., 1., 0., 0.],
+        };
+        state.history.items = vec![first.clone(), first.shifted(100., 0.)];
+        state.selected = vec![0, 1];
+        assert_eq!(
+            state.selection_frame().unwrap().bounds(),
+            (10., 10., 130., 30.)
+        );
+        state.begin_object_drag();
+        assert_eq!(state.moving.as_ref().unwrap().originals.len(), 2);
+        state.moving = None;
+        state.selection = Some((100., 0., 100., 100.));
+        state.deselect_hidden();
+        assert_eq!(state.selected, vec![1]);
+        state.selection = Some((200., 0., 100., 100.));
+        state.deselect_hidden();
+        assert!(state.selected.is_empty());
+        assert!(state.selection_frame().is_none());
+        assert_eq!(state.history.items[0].matrix, first.matrix);
+    }
+
+    #[test]
     fn region_resize_clamps_edges_and_preserves_opposite_corner() {
         let region = (20., 30., 100., 80.);
         assert_eq!(
@@ -2002,7 +2157,7 @@ mod tests {
                 undo: vec![],
                 region: None,
             },
-            selected: None,
+            selected: vec![],
             moving: None,
             handle: None,
             region_drag: None,
@@ -2060,7 +2215,7 @@ mod tests {
                 undo: vec![],
                 region: None,
             },
-            selected: None,
+            selected: vec![],
             moving: None,
             handle: None,
             region_drag: None,

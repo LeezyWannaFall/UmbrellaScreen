@@ -77,6 +77,8 @@ Hover over a button for a tooltip. To add text, select **T**, click inside the s
 
 Ctrl shortcuts work across keyboard layouts. Standard text-field shortcuts apply while entering text. The checkmark button saves and copies the screenshot, then closes the editor.
 
+Use **Shift+click** or **Ctrl+click** with the selection tool to select multiple objects. Move, resize, rotate, or delete them together.
+
 ## Saving
 
 The `~/Pictures/screenshots/` directory is created automatically. Files have unique names and preserve the selected region's resolution. Saving sends a notification with a thumbnail and the file location. Notifications require a running notification service.
