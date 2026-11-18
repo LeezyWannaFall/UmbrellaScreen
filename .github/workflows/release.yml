@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf gtk4 gtk4-layer-shell grim wl-clipboard hyprland github-cli
+      - uses: actions/checkout@v4
+      - name: Check release version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          test "$GITHUB_REF_NAME" = "v$version"
+      - name: Build and test Arch package
+        shell: bash
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- bash packaging/build-arch.sh
+      - name: Verify packaged executable
+        shell: bash
+        run: |
+          mkdir /tmp/umbrellascreen-package
+          bsdtar -xf target/packages/umbrellascreen-*.pkg.tar.zst -C /tmp/umbrellascreen-package
+          /tmp/umbrellascreen-package/usr/bin/umbrellascreen --help
+          if readelf -d /tmp/umbrellascreen-package/usr/bin/umbrellascreen | grep -E 'RPATH|RUNPATH'; then
+            echo 'Unexpected runtime library search path' >&2
+            exit 1
+          fi
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            target/packages/umbrellascreen-*.pkg.tar.zst \
+            target/packages/SHA256SUMS \
+            --verify-tag --title "UmbrellaScreen $GITHUB_REF_NAME" \
+            --notes-file packaging/RELEASE.md

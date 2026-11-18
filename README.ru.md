@@ -12,6 +12,16 @@
 
 ## Установка
 
+Скачайте пакет для Arch Linux x86_64 из [Releases](https://github.com/LeezyWannaFall/UmbrellaScreen/releases/latest) и установите через pacman.
+
+```sh
+sudo pacman -U ./umbrellascreen-0.1.0-1-x86_64.pkg.tar.zst
+```
+
+Запустите `umbrellascreen` в сессии Hyprland. При установке пакета укажите `/usr/bin/umbrellascreen` в привязке клавиши.
+
+### Сборка из исходников
+
 Установите зависимости и клонируйте репозиторий
 
 ```sh

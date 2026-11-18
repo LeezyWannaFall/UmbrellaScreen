@@ -12,6 +12,16 @@ Select a region with the mouse, add annotations, and press **Enter**. The PNG is
 
 ## Installation
 
+Download the Arch Linux x86_64 package from [Releases](https://github.com/LeezyWannaFall/UmbrellaScreen/releases/latest) and install it with pacman.
+
+```sh
+sudo pacman -U ./umbrellascreen-0.1.0-1-x86_64.pkg.tar.zst
+```
+
+Run `umbrellascreen` inside Hyprland. When using the package, set the executable in your key binding to `/usr/bin/umbrellascreen`.
+
+### Build from source
+
 Install the dependencies and clone the repository
 
 ```sh
